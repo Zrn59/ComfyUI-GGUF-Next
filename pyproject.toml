@@ -9,8 +9,9 @@ dependencies = ["gguf>=0.13.0", "sentencepiece", "protobuf"]
 [project.urls]
 Repository = "https://github.com/Zrn59/ComfyUI-GGUF-Next"
 Upstream = "https://github.com/city96/ComfyUI-GGUF"
+Documentation = "https://github.com/Zrn59/ComfyUI-GGUF-Next/blob/main/docs/en/README.md"
+"Bug Tracker" = "https://github.com/Zrn59/ComfyUI-GGUF-Next/issues"
 
 [tool.comfy]
-PublisherId = "" # TODO: set your ComfyUI Registry publisher id
+PublisherId = "zrn59"
 DisplayName = "ComfyUI-GGUF-Next"
-Icon = ""

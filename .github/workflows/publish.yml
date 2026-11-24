@@ -1,0 +1,25 @@
+name: publish
+
+# Publishes the node to the Comfy Registry (and so to ComfyUI-Manager) when a GitHub release is published.
+# Bump `version` in pyproject.toml before the release: the Registry rejects a version it already has.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  registry:
+    if: github.repository_owner == 'Zrn59'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Publish to the Comfy Registry
+        env:
+          REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+        run: |
+          pip install comfy-cli
+          comfy --skip-prompt --no-enable-telemetry env
+          comfy node publish --token "$REGISTRY_ACCESS_TOKEN"

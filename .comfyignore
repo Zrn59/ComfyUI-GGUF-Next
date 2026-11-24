@@ -1,0 +1,7 @@
+# Left out of the Comfy Registry package: README media, CI and tests
+docs/*.mp4
+docs/*.webp
+docs/*.png
+.github/
+tests/
+pytest.ini

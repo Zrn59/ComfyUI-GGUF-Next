@@ -186,17 +186,20 @@ def test_find_mmproj(loader, tmp_path):
 
     exp = loader.MMPROJ_PROJECTORS["qwen2vl"]
     # matched by name, quant suffix stripped
-    d = tmp_path / "named"; d.mkdir()
+    d = tmp_path / "named"
+    d.mkdir()
     te = write_gguf(d / "Qwen2.5-VL-7B.Q4_K_M.gguf", "qwen2vl", w)
     mm = mmproj(d / "Qwen2.5-VL-7B.mmproj-f16.gguf", "qwen2.5vl_merger")
     mmproj(d / "Other-Model-mmproj.gguf", "qwen3vl_merger")
     assert loader.find_mmproj(te, exp)[0] == mm
     # renamed files: the single mmproj is used only if its projector fits
-    d = tmp_path / "single_ok"; d.mkdir()
+    d = tmp_path / "single_ok"
+    d.mkdir()
     te = write_gguf(d / "renamed-te.gguf", "qwen2vl", w)
     mm = mmproj(d / "mmproj-whatever.gguf", "qwen2vl_merger")
     assert loader.find_mmproj(te, exp)[0] == mm
-    d = tmp_path / "single_wrong"; d.mkdir()
+    d = tmp_path / "single_wrong"
+    d.mkdir()
     te = write_gguf(d / "renamed-te.gguf", "qwen2vl", w)
     mmproj(d / "mmproj-whatever.gguf", "qwen3vl_merger")
     assert loader.find_mmproj(te, exp)[0] is None
