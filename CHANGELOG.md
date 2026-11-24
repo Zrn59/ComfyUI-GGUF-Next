@@ -54,7 +54,7 @@
 - pytest support (`conftest.py`, `pytest.ini`) and a GitHub Actions workflow: kernel tests on Python 3.10 and 3.12 with gguf 0.13.0 and the latest gguf, plus integration tests against ComfyUI master with the compile path on. CI also checks that `requirements.txt` changes no installed package.
 - `tests/test_loader.py`: synthetic GGUFs for the llama.cpp → HF key maps, the Q/K un-permute, Gemma norms, ComfyUI-layout passthrough, unknown archs, tensor kinds, `mmproj` lookup and `convert.py` fingerprints.
 - README rewritten, with a Russian translation (`README.ru.md`) and paired docs pages in `docs/` and `docs/en/`.
-- README shows the checks on real files: Anima generated with city96 and GGUF-Next (bit-identical), six GGUF files loaded with city96, leejet, Nif00 and GGUF-Next, and LTX-2.5 / MiniMax H3 videos made from GGUF files only. Images and videos are in `docs/`.
+- README shows the checks on real files: Anima generated with city96 and GGUF-Next (bit-identical), six GGUF files loaded with city96, leejet, Nif00, molbal, ChrisColeTech and GGUF-Next, and LTX-2.5 / MiniMax H3 videos made from GGUF files only. Images and videos are in `docs/`.
 
 ### Fixes carried over from leejet/ComfyUI-GGUF
 - Qwen3-VL mmproj mapping and the Ideogram4 / Krea2 / MiniMax / Qwen-Image 2.1 fingerprints.

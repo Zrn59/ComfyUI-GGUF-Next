@@ -37,7 +37,7 @@ Before the release, on an RTX 3050 Laptop, torch 2.11, ComfyUI 0.42.1:
 - Anima Q4_K_M, full 512×512 generation in separate processes, compared with city96/ComfyUI-GGUF: bit-identical for Unet Loader (GGUF), for Advanced with `dequant_dtype=target` / `patch_dtype=float32`, and with a LoRA. CLIPLoader (GGUF) gives the same image as the stock CLIPLoader.
 - `compile_dequant` on every quantized tensor of the Anima file: never further from fp32 than the regular path. The image changes in details, as with ComfyUI's TorchCompileModel on city96.
 - A ComfyUI server with the pack in `custom_nodes`: the nodes register in the `bootleg` category, workflows run over the HTTP API, and a warning is printed next to the original ComfyUI-GGUF.
-- Six real GGUF files loaded with city96, leejet, Nif00 and GGUF-Next (table in the README). Qwen2.5-VL-7B encoding is bit-identical across city96, leejet and GGUF-Next.
+- Six real GGUF files loaded with city96, leejet, Nif00, molbal, ChrisColeTech and GGUF-Next (table in the README). Qwen2.5-VL-7B encoding is bit-identical across city96, leejet, molbal and GGUF-Next.
 - LTX-2.5 + Gemma 4 12B (1280×704, 97 frames, two-stage with the latent upscaler) and MiniMax H3 + Qwen3-VL-32B (960×544, 73 frames): full text-to-video generation with sound, all weights from GGUF. Text encoder, transformer and VAE ran in separate processes so that one large model at a time is in RAM.
 - `GGUF_RELEASE_MMAP=0` and `1` give the same Anima image, with and without a LoRA, and the same as city96. With `0` the load adds 3 MB of RAM instead of 1.3 GB.
 - `pip install -r requirements.txt` in a venv with ComfyUI's requirements added only `gguf` and `protobuf`; `pip check` is clean.

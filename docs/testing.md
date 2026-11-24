@@ -37,7 +37,7 @@ CI (`.github/workflows/tests.yml`) гоняет ядра на Python 3.10 и 3.1
 - Anima Q4_K_M, полная генерация 512×512 в отдельных процессах, сравнение с city96/ComfyUI-GGUF: совпадение бит-в-бит для Unet Loader (GGUF), для Advanced с `dequant_dtype=target` / `patch_dtype=float32`, с LoRA. CLIPLoader (GGUF) даёт ту же картинку, что и штатный CLIPLoader.
 - `compile_dequant` на каждом квантованном тензоре файла Anima: ни разу не дальше от fp32, чем обычный путь. Картинка меняется в деталях, как и с TorchCompileModel ComfyUI на city96.
 - Сервер ComfyUI с паком в `custom_nodes`: узлы зарегистрированы в категории `bootleg`, воркфлоу через HTTP API отрабатывают, рядом с оригинальным ComfyUI-GGUF выводится предупреждение.
-- Шесть реальных GGUF-файлов загружены паками city96, leejet, Nif00 и GGUF-Next (таблица в README). Кодирование Qwen2.5-VL-7B совпадает бит-в-бит у city96, leejet и GGUF-Next.
+- Шесть реальных GGUF-файлов загружены паками city96, leejet, Nif00, molbal, ChrisColeTech и GGUF-Next (таблица в README). Кодирование Qwen2.5-VL-7B совпадает бит-в-бит у city96, leejet, molbal и GGUF-Next.
 - LTX-2.5 + Gemma 4 12B (1280×704, 97 кадров, две стадии с латентным апскейлером) и MiniMax H3 + Qwen3-VL-32B (960×544, 73 кадра): полная генерация видео со звуком по тексту, все веса из GGUF. Энкодер, трансформер и VAE запускались отдельными процессами, чтобы в RAM была одна большая модель за раз.
 - `GGUF_RELEASE_MMAP=0` и `1` дают одну и ту же картинку Anima, с LoRA и без, и она совпадает с city96. С `0` загрузка добавляет 3 МБ RAM вместо 1.3 ГБ.
 - `pip install -r requirements.txt` в venv с требованиями ComfyUI добавил только `gguf` и `protobuf`, `pip check` чистый.

@@ -38,18 +38,24 @@
 
 ## Проверено на реальных файлах
 
-Каждый файл загружен четырьмя паками GGUF на одной ComfyUI: RTX 3050 Laptop 4 ГБ, 15 ГБ RAM.
+Каждый файл загружен шестью паками GGUF на одной ComfyUI: RTX 3050 Laptop 4 ГБ, 15 ГБ RAM.
 
-| Файл | city96 | leejet | Nif00 | GGUF-Next |
-| --- | --- | --- | --- | --- |
-| Anima turbo Q4_K_M | ✅ | ✅ | ✅ | ✅ полная генерация, бит-в-бит с city96 |
-| LTX-2.5 Distilled Q4_K_M | ✅ | ✅ | ✅ | ✅ полная генерация |
-| MiniMax H3 Q4_K (sd.cpp, без метаданных) | ❌ неизвестная архитектура | ✅ | ❌ неизвестная архитектура | ✅ полная генерация |
-| Qwen2.5-VL-7B Q4_K_M | ✅ | ✅ | ✅ | ✅ кодирование бит-в-бит с city96 |
-| Gemma 4 12B Q5_K_M (энкодер LTX-2.5) | ❌ `gemma4` отклонён | ❌ `gemma4` отклонён | ❌ `KeyError` | ✅ |
-| Qwen3-VL-32B UD-Q2_K_XL (энкодер MiniMax H3) | ❌ `TypeError` | ❌ не те ключи | ❌ CUDA OOM | ✅ |
+| Файл | city96 | leejet | Nif00 | molbal | ChrisColeTech | GGUF-Next |
+| --- | --- | --- | --- | --- | --- | --- |
+| Anima turbo Q4_K_M | ✅ | ✅ | ✅ | ✅ картинка отличается от city96 | ✅ бит-в-бит с city96 | ✅ полная генерация, бит-в-бит с city96 |
+| LTX-2.5 Distilled Q4_K_M | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ полная генерация |
+| MiniMax H3 Q4_K (sd.cpp, без метаданных) | ❌ неизвестная архитектура | ✅ | ❌ неизвестная архитектура | ✅ | ✅ | ✅ полная генерация |
+| Qwen2.5-VL-7B Q4_K_M | ✅ | ✅ | ✅ | ✅ бит-в-бит с city96 | ❌ CUDA OOM | ✅ кодирование бит-в-бит с city96 |
+| Gemma 4 12B Q5_K_M (энкодер LTX-2.5) | ❌ `gemma4` отклонён | ❌ `gemma4` отклонён | ❌ `KeyError` | ✅ то же кодирование, что у GGUF-Next | ❌ I16 не поддерживается | ✅ |
+| Qwen3-VL-32B UD-Q2_K_XL (энкодер MiniMax H3) | ❌ `TypeError` | ❌ не те ключи | ❌ CUDA OOM | ❌ CUDA OOM | ❌ не те размеры слоёв | ✅ |
 
-leejet — это [leejet/ComfyUI-GGUF](https://github.com/leejet/ComfyUI-GGUF), Nif00 — [Nif00/ComfyUI-GGUF](https://github.com/Nif00/ComfyUI-GGUF). Без GGUF-энкодера LTX-2.5 и MiniMax H3 в других паках не запустить из одних GGUF-файлов. В GGUF-Next обе модели проходят от промпта до кадров:
+leejet — это [leejet/ComfyUI-GGUF](https://github.com/leejet/ComfyUI-GGUF), Nif00 — [Nif00/ComfyUI-GGUF](https://github.com/Nif00/ComfyUI-GGUF), molbal — [molbal/ComfyUI-GGUF](https://github.com/molbal/ComfyUI-GGUF) на `3ae2b68`, ChrisColeTech — [ChrisColeTech/ComfyUI-GGUF-Loader](https://github.com/ChrisColeTech/ComfyUI-GGUF-Loader) на `109a281`.
+
+- CUDA OOM значит, что энкодер не поместился в эту карту на 4 ГБ. GGUF-Next кодирует те же файлы на ней.
+- Картинка Anima у molbal отличается от city96, PSNR 25.9 дБ. С выключенным Triton-бэкендом картинка та же, так что разница не из него. На турбо-модели в 6 шагов даже мелкие различия округления дают такую разницу.
+- ChrisColeTech импортирует OpenCV при запуске, а его не ставит ни его `requirements.txt`, ни ComfyUI. Без него не загружается весь пак. Для теста он был установлен.
+
+Энкодер Gemma 4 от LTX-2.5 загружают только GGUF-Next и molbal, а энкодер Qwen3-VL-32B от MiniMax H3 на 4 ГБ запускает только GGUF-Next. В GGUF-Next обе модели проходят от промпта до кадров:
 
 <p align="center">
   <img src="docs/ltx25.webp" alt="Видео LTX-2.5 из GGUF-файлов" width="720"><br>
@@ -138,7 +144,7 @@ LTX-2.5 Q4_K_M — файл на 15.7 ГБ, на машине с 15 ГБ RAM, в
 | Картинка Anima против city96: Unet Loader (GGUF), Advanced, с LoRA, `GGUF_RELEASE_MMAP=0` и `1` | бит-в-бит |
 | Кодирование текста Qwen2.5-VL-7B против city96 и leejet | бит-в-бит |
 | `compile_dequant` на каждом квантованном тензоре файла Anima | никогда не дальше от fp32, чем обычный путь |
-| Шесть реальных GGUF в четырёх паках | [таблица выше](#проверено-на-реальных-файлах) |
+| Шесть реальных GGUF в шести паках | [таблица выше](#проверено-на-реальных-файлах) |
 | LTX-2.5 и MiniMax H3, текст в видео со звуком, только из GGUF | видео выше |
 | `pip install -r requirements.txt` в venv с ComfyUI | добавляет только `gguf` и `protobuf`, `pip check` чистый |
 

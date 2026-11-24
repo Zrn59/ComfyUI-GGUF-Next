@@ -38,18 +38,24 @@ On models upstream already supports, the output is the same bit for bit, with an
 
 ## Checked on real files
 
-Each file was loaded with four GGUF packs on the same ComfyUI: RTX 3050 Laptop 4 GB, 15 GB RAM.
+Each file was loaded with six GGUF packs on the same ComfyUI: RTX 3050 Laptop 4 GB, 15 GB RAM.
 
-| File | city96 | leejet | Nif00 | GGUF-Next |
-| --- | --- | --- | --- | --- |
-| Anima turbo Q4_K_M | ✅ | ✅ | ✅ | ✅ full generation, bit-identical to city96 |
-| LTX-2.5 Distilled Q4_K_M | ✅ | ✅ | ✅ | ✅ full generation |
-| MiniMax H3 Q4_K (sd.cpp, no metadata) | ❌ unknown architecture | ✅ | ❌ unknown architecture | ✅ full generation |
-| Qwen2.5-VL-7B Q4_K_M | ✅ | ✅ | ✅ | ✅ encoding bit-identical to city96 |
-| Gemma 4 12B Q5_K_M (LTX-2.5 encoder) | ❌ `gemma4` rejected | ❌ `gemma4` rejected | ❌ `KeyError` | ✅ |
-| Qwen3-VL-32B UD-Q2_K_XL (MiniMax H3 encoder) | ❌ `TypeError` | ❌ wrong keys | ❌ CUDA OOM | ✅ |
+| File | city96 | leejet | Nif00 | molbal | ChrisColeTech | GGUF-Next |
+| --- | --- | --- | --- | --- | --- | --- |
+| Anima turbo Q4_K_M | ✅ | ✅ | ✅ | ✅ image differs from city96 | ✅ bit-identical to city96 | ✅ full generation, bit-identical to city96 |
+| LTX-2.5 Distilled Q4_K_M | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ full generation |
+| MiniMax H3 Q4_K (sd.cpp, no metadata) | ❌ unknown architecture | ✅ | ❌ unknown architecture | ✅ | ✅ | ✅ full generation |
+| Qwen2.5-VL-7B Q4_K_M | ✅ | ✅ | ✅ | ✅ bit-identical to city96 | ❌ CUDA OOM | ✅ encoding bit-identical to city96 |
+| Gemma 4 12B Q5_K_M (LTX-2.5 encoder) | ❌ `gemma4` rejected | ❌ `gemma4` rejected | ❌ `KeyError` | ✅ same encoding as GGUF-Next | ❌ I16 not supported | ✅ |
+| Qwen3-VL-32B UD-Q2_K_XL (MiniMax H3 encoder) | ❌ `TypeError` | ❌ wrong keys | ❌ CUDA OOM | ❌ CUDA OOM | ❌ wrong layer sizes | ✅ |
 
-leejet is [leejet/ComfyUI-GGUF](https://github.com/leejet/ComfyUI-GGUF), Nif00 is [Nif00/ComfyUI-GGUF](https://github.com/Nif00/ComfyUI-GGUF). Without a GGUF text encoder, LTX-2.5 and MiniMax H3 can't run from GGUF files alone in the other packs. In GGUF-Next both run end to end:
+leejet is [leejet/ComfyUI-GGUF](https://github.com/leejet/ComfyUI-GGUF), Nif00 is [Nif00/ComfyUI-GGUF](https://github.com/Nif00/ComfyUI-GGUF), molbal is [molbal/ComfyUI-GGUF](https://github.com/molbal/ComfyUI-GGUF) at `3ae2b68`, ChrisColeTech is [ChrisColeTech/ComfyUI-GGUF-Loader](https://github.com/ChrisColeTech/ComfyUI-GGUF-Loader) at `109a281`.
+
+- CUDA OOM means the encoder did not fit on this 4 GB card. GGUF-Next encodes the same files on it.
+- molbal's Anima image differs from city96 with a PSNR of 25.9 dB. With its Triton backend turned off the image is the same, so the difference comes from elsewhere. On a 6-step turbo model small rounding differences already show up this much.
+- ChrisColeTech imports OpenCV at startup, and neither its `requirements.txt` nor ComfyUI installs it. Without it the whole pack fails to load. It was installed for this test.
+
+Only GGUF-Next and molbal load the Gemma 4 encoder of LTX-2.5, and only GGUF-Next runs the Qwen3-VL-32B encoder of MiniMax H3 on 4 GB. In GGUF-Next both models run end to end:
 
 <p align="center">
   <img src="docs/ltx25.webp" alt="LTX-2.5 video made from GGUF files" width="720"><br>
@@ -138,7 +144,7 @@ More: [docs/en/README.md](docs/en/README.md). Suggestions: [Discussions](https:/
 | Anima image against city96: Unet Loader (GGUF), the Advanced loader, with a LoRA, `GGUF_RELEASE_MMAP=0` and `1` | bit-identical |
 | Qwen2.5-VL-7B text encoding against city96 and leejet | bit-identical |
 | `compile_dequant` on every quantized tensor of the Anima file | never further from fp32 than the regular path |
-| Six real GGUF files in four packs | [table above](#checked-on-real-files) |
+| Six real GGUF files in six packs | [table above](#checked-on-real-files) |
 | LTX-2.5 and MiniMax H3 text-to-video with sound, GGUF files only | videos above |
 | `pip install -r requirements.txt` in a ComfyUI venv | adds only `gguf` and `protobuf`, `pip check` is clean |
 

@@ -37,8 +37,8 @@ Checked on real files:
 | File | What was checked |
 | --- | --- |
 | Qwen2.5-VL-7B Q4_K_M + mmproj | prompt encoding is bit-identical to upstream |
-| Qwen3-VL-32B UD-Q2_K_XL + mmproj (MiniMax H3) | 902 tensors, no missing or unexpected keys, encoding, MiniMax H3 generation. city96, leejet and Nif00 fail on this file |
-| Gemma 4 12B Q5_K_M (LTX-2.5) | 682 tensors, no missing keys, encoding, LTX-2.5 generation. city96, leejet and Nif00 fail on this file |
+| Qwen3-VL-32B UD-Q2_K_XL + mmproj (MiniMax H3) | 902 tensors, no missing or unexpected keys, encoding, MiniMax H3 generation. city96, leejet, Nif00, molbal and ChrisColeTech fail on this file |
+| Gemma 4 12B Q5_K_M (LTX-2.5) | 682 tensors, no missing keys, encoding, LTX-2.5 generation. city96, leejet, Nif00 and ChrisColeTech fail on this file; molbal gives the same encoding |
 
 On a 4 GB card the Gemma 4 12B encoder for LTX-2.5 runs only on the CPU, with `--novram` (about 4 minutes per prompt on a laptop CPU). The limit is ComfyUI's encoder code, not the GGUF pack: it pads the prompt to 1024 tokens, keeps the output of all 49 layers and concatenates them. With no weights on the GPU at all that still needs more than 3.7 GB, and `--reserve-vram` does not help. Qwen3-VL-32B for MiniMax H3 runs on the GPU of the same card in the automatic mode, with a 2.8 GB peak.
 
