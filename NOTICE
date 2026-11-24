@@ -1,0 +1,19 @@
+ComfyUI-GGUF-Next
+Copyright 2026 Zrn59 and the ComfyUI-GGUF-Next contributors
+
+This product is a modified version of ComfyUI-GGUF
+(https://github.com/city96/ComfyUI-GGUF), Copyright city96 and the
+ComfyUI-GGUF contributors, licensed under the Apache License, Version 2.0.
+
+It also includes changes from leejet/ComfyUI-GGUF
+(https://github.com/leejet/ComfyUI-GGUF), licensed under the Apache License,
+Version 2.0: the Qwen3-VL mmproj key mapping and the Ideogram4, Krea2,
+MiniMax and Qwen-Image 2.1 architecture fingerprints.
+
+Modified files carry a header line saying so. CHANGELOG.md has the full list
+of changes made in this fork.
+
+Parts of this product are derived from MIT-licensed software from the
+llama.cpp / ggml project (the gguf-py reference dequantization routines and
+the llama.cpp source modified by tools/lcpp.patch). See
+THIRD_PARTY_NOTICES.md for their copyright and license notices.

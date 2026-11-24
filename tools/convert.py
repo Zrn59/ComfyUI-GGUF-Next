@@ -1,4 +1,5 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+# Modified by ComfyUI-GGUF-Next: more architecture fingerprints, --arch override, F32 for bare params
 import os
 import gguf
 import torch
@@ -145,8 +146,50 @@ class ModelLumina2(ModelTemplate):
         ("cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight")
     ]
 
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2, 
-             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2]
+# --- ComfyUI-GGUF-Next additions ---
+# Fingerprints follow comfy/model_detection.py (reference / non-diffusers key names).
+# The arch string mostly matters for logging; ComfyUI detects the model from the keys.
+
+def _simple_arch(name, detect, hiprec=(), ignore=(), banned=(), base=ModelTemplate):
+    return type(f"Model_{name}", (base,), {
+        "arch": name,
+        "keys_detect": list(detect),
+        "keys_hiprec": list(hiprec),
+        "keys_ignore": list(ignore),
+        "keys_banned": list(banned),
+    })
+
+ModelFlux3 = _simple_arch("flux3", [("content_mode_blocks.image.0.attn_out.weight", "single_stream_modulations.txt.lin.weight")])
+ModelFlux2 = _simple_arch("flux2", [("double_stream_modulation_img.lin.weight", "double_blocks.0.img_attn.proj.weight")])
+ModelChroma = _simple_arch("chroma", [
+    ("distilled_guidance_layer.norms.0.scale", "double_blocks.0.img_attn.proj.weight"),
+    ("distilled_guidance_layer.norms.0.weight", "double_blocks.0.img_attn.proj.weight"),
+    ("distilled_guidance_layer.0.norms.0.scale", "double_blocks.0.img_attn.proj.weight"),
+])
+ModelHiDreamO1 = _simple_arch("hidream_o1", [("t_embedder1.mlp.0.weight", "x_embedder.proj1.weight")])
+ModelQwenImage = _simple_arch("qwen_image", [("txt_norm.weight", "transformer_blocks.0.img_mod.1.weight")])
+ModelIdeogram4 = _simple_arch("ideogram4", [("embed_image_indicator.weight",)])
+ModelKrea2 = _simple_arch("krea2", [("txtfusion.projector.weight",), ("text_fusion.projector.weight",)])
+ModelMiniMax = _simple_arch("minimax", [("video_patch_proj.weight", "audio_patch_proj.weight")], hiprec=["adaln_t_table"])
+QwenImage21 = _simple_arch("qwen_image21", [("txt_in.text_norm.weight",)])
+# LTX-2 audio/video: written as "ltxv" so the patched llama.cpp applies the LTXV rules (they also match audio_*)
+ModelLTXAV = _simple_arch("ltxv", [("adaln_single.emb.timestep_embedder.linear_2.weight", "audio_adaln_single.linear.weight")],
+                          hiprec=["scale_shift_table"])
+ModelMochi = _simple_arch("mochi", [("t5_yproj.weight",)])
+ModelPixArt = _simple_arch("pixart", [("t_block.1.weight", "y_embedder.y_proj.fc1.weight")])
+ModelHyDiT = _simple_arch("hydit", [("mlp_t5.0.weight",)])
+ModelKandinsky5 = _simple_arch("kandinsky5", [("visual_transformer_blocks.0.cross_attention.key_norm.weight",)])
+ModelBoogu = _simple_arch("boogu", [("double_stream_layers.0.img_instruct_attn.processor.img_to_q.weight",)])
+ModelOmnigen2 = _simple_arch("omnigen2", [("time_caption_embed.timestep_embedder.linear_1.bias",)])
+ModelMossImage = _simple_arch("moss_image", [("shared_block_modulation.weight", "layers.0.proj.ffn_up_gate.weight")])
+ModelACE = _simple_arch("ace", [("genre_embedder.weight",)])
+ModelErnie = _simple_arch("ernie", [("layers.0.mlp.linear_fc2.weight",)])
+
+# order matters: more specific fingerprints first
+arch_list = [ModelFlux3, ModelFlux2, ModelChroma, ModelFlux, ModelSD3, ModelAura, ModelHiDreamO1, ModelHiDream,
+             CosmosPredict2, ModelMiniMax, ModelLTXAV, ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1,
+             ModelLumina2, ModelIdeogram4, ModelKrea2, QwenImage21, ModelQwenImage, ModelMochi, ModelPixArt,
+             ModelHyDiT, ModelKandinsky5, ModelBoogu, ModelOmnigen2, ModelMossImage, ModelACE, ModelErnie]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
@@ -160,19 +203,24 @@ def is_model_arch(model, state_dict):
     assert not invalid, "Model architecture not allowed for conversion! (i.e. reference VS diffusers format)"
     return matched
 
-def detect_arch(state_dict):
+def detect_arch(state_dict, fallback=None):
     model_arch = None
     for arch in arch_list:
         if is_model_arch(arch, state_dict):
             model_arch = arch()
             break
-    assert model_arch is not None, "Unknown model architecture!"
+    if model_arch is None and fallback:
+        # unknown model: write it anyway, ComfyUI detects the model from the tensor names
+        logging.warning(f"Unknown model architecture, using user supplied arch '{fallback}'")
+        model_arch = _simple_arch(fallback, [])()
+    assert model_arch is not None, "Unknown model architecture! (use --arch <name> to force one)"
     return model_arch
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate F16 GGUF files from single UNET")
     parser.add_argument("--src", required=True, help="Source model ckpt file.")
     parser.add_argument("--dst", help="Output unet gguf file.")
+    parser.add_argument("--arch", default=None, help="Arch string to use if the model isn't auto-detected. Use 'comfy_dit' if you want to quantize the result with the patched llama.cpp (tools/lcpp.patch).")
     args = parser.parse_args()
 
     if not os.path.isfile(args.src):
@@ -284,6 +332,11 @@ def handle_tensors(writer, state_dict, model_arch):
                 # tensors that require max precision
                 data_qtype = gguf.GGMLQuantizationType.F32
 
+            elif not key.endswith((".weight", ".bias")):
+                # bare nn.Parameter / buffers (modulation, scale_shift_table, pos_embed, ...)
+                # are not handled by the GGML layers, keep them in full precision
+                data_qtype = gguf.GGMLQuantizationType.F32
+
         if (model_arch.shape_fix                        # NEVER reshape for models such as flux
             and n_dims > 1                              # Skip one-dimensional tensors
             and n_params >= REARRANGE_THRESHOLD         # Only rearrange tensors meeting the size requirement
@@ -308,10 +361,10 @@ def handle_tensors(writer, state_dict, model_arch):
 
         writer.add_tensor(new_name, data, raw_dtype=data_qtype)
 
-def convert_file(path, dst_path=None, interact=True, overwrite=False):
+def convert_file(path, dst_path=None, interact=True, overwrite=False, arch=None):
     # load & run model detection logic
     state_dict = load_state_dict(path)
-    model_arch = detect_arch(state_dict)
+    model_arch = detect_arch(state_dict, fallback=arch)
     logging.info(f"* Architecture detected from input: {model_arch.arch}")
 
     # detect & set dtype for output file
@@ -361,5 +414,5 @@ def convert_file(path, dst_path=None, interact=True, overwrite=False):
 
 if __name__ == "__main__":
     args = parse_args()
-    convert_file(args.src, args.dst)
+    convert_file(args.src, args.dst, arch=args.arch)
 

@@ -7,6 +7,8 @@ python convert.py --src E:\models\unet\flux1-dev.safetensors
 ```
 Make sure `gguf>=0.13.0` is installed for this step. Optionally, specify the output gguf file with the `--dst` arg.
 
+If the architecture isn't recognized, you can force an arch string with `--arch <name>` (e.g. `--arch my_dit`). ComfyUI detects the actual model from the tensor names when loading, so the string is mostly informational.
+
 > [!NOTE]  
 > Do not use the diffusers UNET format for flux, it won't work, use the default/reference checkpoint key format. This is due to q/k/v being merged into one qkv key.
 > You can convert it by loading it in ComfyUI and saving it using the built-in "ModelSave" node.
@@ -70,6 +72,15 @@ Then you can build the project:
 cmake --build build --config Debug -j10 --target llama-quantize
 cd ..
 ```
+
+### Supported architectures
+
+The patch (updated in ComfyUI-GGUF-Next) knows these arch strings:
+
+- with model-specific rules: `flux`, `sd1`, `sdxl`, `sd3`, `aura`, `ltxv` (including LTX-2 audio/video), `hyvid`, `wan`, `hidream`, `cosmos`, `lumina2`
+- with a shared rule set that keeps embedders, I/O projections and modulation tables in high precision: `flux2`, `flux3`, `chroma`, `hidream_o1`, `qwen_image`, `qwen_image21`, `minimax`, `ideogram4`, `krea2`, `mochi`, `pixart`, `hydit`, `kandinsky5`, `boogu`, `omnigen2`, `moss_image`, `ace`, `ernie` and the catch-all `comfy_dit`
+
+`convert.py` writes these names automatically. For a model it doesn't recognize, use `--arch comfy_dit`.
 
 ### Quantize your model
 

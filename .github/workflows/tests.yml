@@ -1,0 +1,59 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # weekly: catch ComfyUI / gguf-py changes early
+
+jobs:
+  dequant:
+    name: kernels (py${{ matrix.python }}, gguf ${{ matrix.gguf }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+        gguf: ["0.13.0", "latest"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          if [ "${{ matrix.gguf }}" = "latest" ]; then pip install -U gguf; else pip install "gguf==${{ matrix.gguf }}"; fi
+          pip install numpy tqdm packaging pytest
+      - name: Kernels vs gguf-py reference
+        run: python -m pytest -q
+
+  comfyui:
+    name: integration (ComfyUI master, CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Checkout ComfyUI
+        run: git clone --depth 1 https://github.com/comfyanonymous/ComfyUI ../ComfyUI
+      - name: Install
+        run: |
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -r ../ComfyUI/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install pytest
+      - name: requirements.txt only adds packages
+        run: |
+          pip freeze | sort > before.txt
+          pip install -r requirements.txt
+          pip freeze | sort > after.txt
+          # every line of before.txt must still be in after.txt: nothing upgraded, downgraded or removed
+          if comm -23 before.txt after.txt | grep .; then echo "requirements.txt changed installed packages"; exit 1; fi
+          comm -13 before.txt after.txt
+          pip check
+      - name: Layer / loader / torch.compile integration
+        env:
+          COMFYUI_PATH: ${{ github.workspace }}/../ComfyUI
+          GGUF_TEST_COMPILE: "1"
+        run: python -m pytest -q

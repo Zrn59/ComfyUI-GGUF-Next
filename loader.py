@@ -1,4 +1,5 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+# Modified by ComfyUI-GGUF-Next: open architecture detection, more text encoders, comfy-layout passthrough
 import warnings
 import logging
 import torch
@@ -7,11 +8,35 @@ import re
 import os
 
 from .ops import GGMLTensor
-from .dequant import is_quantized, dequantize_tensor
+from .dequant import is_quantized, dequantize_tensor, TORCH_NATIVE_DTYPES, INTEGER_QTYPES
 
-IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
-TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
+# Architectures we know load correctly. Diffusion models are detected by ComfyUI
+# itself from the tensor names, so unknown arch strings are accepted with a warning
+# instead of being rejected outright (this is what makes new models "just work").
+IMG_ARCH_LIST = {
+    "flux", "flux2", "flux3", "chroma", "chroma_radiance", "sd1", "sd2", "sdxl", "sd3", "aura",
+    "hidream", "hidream_o1", "cosmos", "cosmos_predict2", "anima", "ltxv", "ltxav", "hyvid",
+    "hunyuan_video", "hunyuan_video15", "hunyuan_image", "hydit", "wan", "wan2.1", "wan22",
+    "lumina2", "zimage", "ming_image", "qwen_image", "qwen_image21", "ideogram4", "krea2",
+    "minimax", "minimax_h3", "mochi", "pixart", "cogvideox", "kandinsky5", "omnigen2", "boogu",
+    "longcat_image", "ernie", "ace", "ace15", "lens", "pixeldit", "mage_flow", "moss_image",
+    "joyimage", "seedvr2", "sensenova", "trellis2", "hunyuan3d", "stable_audio", "stable_cascade",
+    "comfy_dit", # generic arch written by `convert.py --arch comfy_dit`
+}
+# llama.cpp text architectures with a known llama.cpp -> HF key mapping
+LLAMA_LIKE_ARCHS = {
+    "llama", "mistral", "mistral3", "qwen2", "qwen2vl", "qwen25vl", "qwen3", "qwen3vl",
+    "gemma2", "gemma3",
+}
+# archs whose Q/K weights were permuted by llama.cpp's LlamaModel converter
+PERMUTED_QK_ARCHS = {"llama", "mistral", "mistral3"}
+GEMMA_ARCHS = {"gemma", "gemma2", "gemma3", "gemma3n", "gemma4"}
+TXT_ARCH_LIST = {"t5", "t5encoder"} | LLAMA_LIKE_ARCHS | {"gemma4", "qwen35", "qwen3next", "gpt-oss", "t5gemma"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
+
+# llama.cpp-style tensor names - if none of these are present the file already
+# uses ComfyUI/HF state dict names and must not be remapped.
+LCPP_KEY_MARKERS = ("blk.", "token_embd.", "output_norm.", "enc.blk.", "v.blk.", "dec.blk.")
 
 def get_orig_shape(reader, tensor_name):
     field_key = f"comfy.gguf.orig_shape.{tensor_name}"
@@ -48,24 +73,34 @@ def get_list_field(reader, field_name, field_type):
     else:
         raise TypeError(f"Unknown field type {field_type}")
 
+_SCALAR_TYPES = {
+    gguf.GGUFValueType.UINT8: int, gguf.GGUFValueType.INT8: int,
+    gguf.GGUFValueType.UINT16: int, gguf.GGUFValueType.INT16: int,
+    gguf.GGUFValueType.UINT32: int, gguf.GGUFValueType.INT32: int,
+    gguf.GGUFValueType.UINT64: int, gguf.GGUFValueType.INT64: int,
+    gguf.GGUFValueType.FLOAT32: float, gguf.GGUFValueType.FLOAT64: float,
+    gguf.GGUFValueType.BOOL: bool,
+}
+
 def get_gguf_metadata(reader):
     """Extract all simple metadata fields like safetensors"""
     metadata = {}
     for field_name in reader.fields:
         try:
             field = reader.get_field(field_name)
-            if len(field.types) == 1:  # Simple scalar fields only
-                if field.types[0] == gguf.GGUFValueType.STRING:
-                    metadata[field_name] = str(field.parts[field.data[-1]], "utf-8")
-                elif field.types[0] == gguf.GGUFValueType.INT32:
-                    metadata[field_name] = int(field.parts[field.data[-1]])
-                elif field.types[0] == gguf.GGUFValueType.F32:
-                    metadata[field_name] = float(field.parts[field.data[-1]])
-                elif field.types[0] == gguf.GGUFValueType.BOOL:
-                    metadata[field_name] = bool(field.parts[field.data[-1]])
-        except:
+            if len(field.types) != 1:  # Simple scalar fields only
+                continue
+            ftype = field.types[0]
+            if ftype == gguf.GGUFValueType.STRING:
+                metadata[field_name] = str(field.parts[field.data[-1]], "utf-8")
+            elif ftype in _SCALAR_TYPES:
+                metadata[field_name] = _SCALAR_TYPES[ftype](field.parts[field.data[-1]].item())
+        except Exception:
             continue
     return metadata
+
+def uses_lcpp_names(keys):
+    return any(k.startswith(LCPP_KEY_MARKERS) or ".blk." in k for k in keys)
 
 def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=False):
     """
@@ -93,21 +128,36 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
     compat = None
     arch_str = get_field(reader, "general.architecture", str)
     type_str = get_field(reader, "general.type", str)
+    layout = get_field(reader, "comfy.gguf.tensor_name_layout", str)
     if arch_str in [None, "pig", "cow"]:
         if is_text_model:
-            raise ValueError(f"This gguf file is incompatible with llama.cpp!\nConsider using safetensors or a compatible gguf file\n({path})")
-        compat = "sd.cpp" if arch_str is None else arch_str
-        # import here to avoid changes to convert.py breaking regular models
-        from .tools.convert import detect_arch
-        try:
-            arch_str = detect_arch(set(val[0] for val in tensors)).arch
-        except Exception as e:
-            raise ValueError(f"This model is not currently supported - ({e})")
-    elif arch_str not in TXT_ARCH_LIST and is_text_model:
-        if type_str not in VIS_TYPE_LIST:
-            raise ValueError(f"Unexpected text model architecture type in GGUF file: {arch_str!r}")
-    elif arch_str not in IMG_ARCH_LIST and not is_text_model:
-        raise ValueError(f"Unexpected architecture type in GGUF file: {arch_str!r}")
+            if arch_str is None and not uses_lcpp_names(k for k, _ in tensors):
+                # raw ComfyUI/HF state dict stored as gguf (e.g. quantized CLIP-L/G, T5)
+                compat = "raw"
+                arch_str = "comfy_raw"
+            else:
+                raise ValueError(f"This gguf file is incompatible with llama.cpp!\nConsider using safetensors or a compatible gguf file\n({path})")
+        else:
+            compat = "sd.cpp" if arch_str is None else arch_str
+            # import here to avoid changes to convert.py breaking regular models
+            from .tools.convert import detect_arch
+            try:
+                arch_str = detect_arch(set(val[0] for val in tensors)).arch
+            except Exception as e:
+                # let ComfyUI's own model detection have a go at it
+                logging.warning(f"ComfyUI-GGUF: architecture not detected from keys ({e}), deferring to ComfyUI model detection")
+                arch_str = "unknown"
+    elif is_text_model:
+        if arch_str not in TXT_ARCH_LIST and type_str not in VIS_TYPE_LIST:
+            if layout == "comfy_state_dict" or not uses_lcpp_names(k for k, _ in tensors):
+                logging.warning(f"ComfyUI-GGUF: unknown text architecture {arch_str!r}, loading tensor names as-is")
+            else:
+                raise ValueError(f"Unexpected text model architecture type in GGUF file: {arch_str!r}")
+    else:
+        if arch_str in TXT_ARCH_LIST and arch_str not in IMG_ARCH_LIST:
+            raise ValueError(f"'{os.path.basename(path)}' is a text encoder ({arch_str}), load it with a CLIP loader instead!")
+        if arch_str not in IMG_ARCH_LIST:
+            logging.warning(f"ComfyUI-GGUF: unknown architecture {arch_str!r}, deferring to ComfyUI model detection")
 
     if compat:
         logging.warning(f"Warning: This gguf model file is loaded in compatibility mode '{compat}' [arch:{arch_str}]")
@@ -134,13 +184,18 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
                         shape = shape[:-1]
 
         # add to state dict
-        if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
-            torch_tensor = torch_tensor.view(*shape)
-        state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
+        if tensor.tensor_type in INTEGER_QTYPES:
+            # integer payloads (tokenizer blobs, index tables) - plain tensors, never dequantized
+            state_dict[sd_key] = torch_tensor.view(TORCH_NATIVE_DTYPES[tensor.tensor_type]).view(*shape)
+        else:
+            if tensor.tensor_type in TORCH_NATIVE_DTYPES:
+                torch_tensor = torch_tensor.view(TORCH_NATIVE_DTYPES[tensor.tensor_type]).view(*shape)
+            state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
 
-        # 1D tensors shouldn't be quantized, this is a fix for BF16
-        if len(shape) <= 1 and tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
-            state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
+            # 1D tensors shouldn't be quantized - this is a fix for BF16 and for
+            # converters (sd.cpp & co) that quantize 1D norm weights / scalars
+            if len(shape) <= 1 and is_quantized(state_dict[sd_key]):
+                state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
 
         # keep track of loaded tensor types
         tensor_type_str = getattr(tensor.tensor_type, "name", repr(tensor.tensor_type))
@@ -158,6 +213,8 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
     # extra info to return
     extra = {
         "arch_str": arch_str,
+        "compat": compat,
+        "qtypes": qtype_dict,
         "metadata": get_gguf_metadata(reader)
     }
     return (state_dict, extra)
@@ -205,6 +262,8 @@ GEMMA3_SD_MAP.update({
     "post_ffw_norm": "post_feedforward_layernorm",
     "post_attention_norm": "post_attention_layernorm",
 })
+# Gemma2 shares the 4-norm sandwich layout with Gemma3 (minus q/k norm)
+GEMMA2_SD_MAP = GEMMA3_SD_MAP
 
 CLIP_VISION_SD_MAP = {
     "mm.": "visual.merger.mlp.",
@@ -214,6 +273,21 @@ CLIP_VISION_SD_MAP = {
     "ffn_up": "mlp.up_proj",
     "ffn_down": "mlp.down_proj",
     "ffn_gate": "mlp.gate_proj",
+    "attn_out.": "attn.proj.",
+    "ln1.": "norm1.",
+    "ln2.": "norm2.",
+}
+
+QWEN3_VISION_SD_MAP = {
+    "mm.0.": "visual.merger.linear_fc1.",
+    "mm.2.": "visual.merger.linear_fc2.",
+    "v.post_ln.": "visual.merger.norm.",
+    "v.position_embd.": "visual.pos_embed.",
+    "v.patch_embd": "visual.patch_embed.proj",
+    "v.blk.": "visual.blocks.",
+    "ffn_up": "mlp.linear_fc1",
+    "ffn_down": "mlp.linear_fc2",
+    "attn_qkv.": "attn.qkv.",
     "attn_out.": "attn.proj.",
     "ln1.": "norm1.",
     "ln2.": "norm2.",
@@ -229,6 +303,7 @@ def sd_map_replace(raw_sd, key_map):
 
 def llama_permute(raw_sd, n_head, n_head_kv):
     # Reverse version of LlamaModel.permute in llama.cpp convert script
+    # NOTE: works directly on quantized data too - rows are independent blocks
     sd = {}
     permute = lambda x,h: x.reshape(h, x.shape[0] // h // 2, 2, *x.shape[1:]).swapaxes(1, 2).reshape(x.shape)
     for k,v in raw_sd.items():
@@ -239,8 +314,8 @@ def llama_permute(raw_sd, n_head, n_head_kv):
         sd[k] = v
     return sd
 
-def gemma3_norm_corrections(sd):
-    # Reverse change from Gemma3Model modify_tensors in llama.cpp convert script
+def gemma_norm_corrections(sd):
+    # Reverse change from Gemma{2,3}Model modify_tensors in llama.cpp convert script (norm + 1)
     norm_patterns = [
         "input_layernorm.weight",
         "post_attention_layernorm.weight",
@@ -250,54 +325,82 @@ def gemma3_norm_corrections(sd):
         "self_attn.k_norm.weight",
         "model.norm.weight"
     ]
-    corrected = 0
     for key in list(sd.keys()):
         if any(p in key for p in norm_patterns):
             if is_quantized(sd[key]):
                 sd[key] = dequantize_tensor(sd[key], dtype=torch.float32) - 1.0
             else:
                 sd[key] = sd[key].float() - 1.0
-            corrected += 1
-    #logging.info(f"Gemma3: Applied -1 norm correction to {corrected} tensors")
     return sd
 
+gemma3_norm_corrections = gemma_norm_corrections # backwards compat alias
+
 def strip_quant_suffix(name):
-    pattern = r"[-_]?(?:ud-)?i?q[0-9]_[a-z0-9_\-]{1,8}$"
+    pattern = r"[-_.]?(?:ud-)?i?q[0-9]_[a-z0-9_\-]{1,8}$"
     match = re.search(pattern, name, re.IGNORECASE)
     if match:
         name = name[:match.start()]
+    for suffix in ("-f16", "-bf16", "-f32", ".f16", ".bf16", "_f16", "_bf16"):
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
     return name
 
-def gguf_mmproj_loader(path):
-    # Reverse version of Qwen2VLVisionModel.modify_tensors
-    logging.info("Attenpting to find mmproj file for text encoder...")
+# llama.cpp mmproj projector types accepted per text encoder arch
+MMPROJ_PROJECTORS = {
+    "qwen2vl": {"qwen2vl_merger", "qwen2.5vl_merger"},
+    "qwen25vl": {"qwen2vl_merger", "qwen2.5vl_merger"},
+    "qwen3vl": {"qwen3vl_merger"},
+}
 
+def _mmproj_projector(path):
+    try:
+        return get_field(gguf.GGUFReader(path), "clip.projector_type", str)
+    except Exception:
+        return None
+
+def find_mmproj(path, expected_projectors=None):
     # get name to match w/o quant suffix
     tenc_fname = os.path.basename(path)
     tenc = os.path.splitext(tenc_fname)[0].lower()
     tenc = strip_quant_suffix(tenc)
 
     # try and find matching mmproj
+    candidates = []
     target = []
     root = os.path.dirname(path)
-    for fname in os.listdir(root):
+    for fname in sorted(os.listdir(root)):
         name, ext = os.path.splitext(fname)
-        if ext.lower() != ".gguf":
+        if ext.lower() != ".gguf" or "mmproj" not in name.lower():
             continue
-        if "mmproj" not in name.lower():
-            continue
+        candidates.append(fname)
         if tenc in name.lower():
             target.append(fname)
 
+    # names don't line up (renamed files): fall back to the only mmproj in the folder,
+    # but only if it is the right kind of projector for this text encoder
+    if len(target) == 0 and len(candidates) == 1:
+        projector = _mmproj_projector(os.path.join(root, candidates[0]))
+        if expected_projectors is None or projector in expected_projectors:
+            target = candidates
+        else:
+            logging.warning(f"Ignoring '{candidates[0]}': projector type {projector!r} doesn't match this text encoder")
+
     if len(target) == 0:
-        logging.error(f"Error: Can't find mmproj file for '{tenc_fname}' (matching:'{tenc}')! Qwen-Image-Edit will be broken!")
-        return {}
+        return None, tenc
     if len(target) > 1:
         logging.error(f"Ambiguous mmproj for text encoder '{tenc_fname}', will use first match.")
+    return os.path.join(root, target[0]), tenc
 
-    logging.info(f"Using mmproj '{target[0]}' for text encoder '{tenc_fname}'.")
-    target = os.path.join(root, target[0])
-    vsd, _ = gguf_sd_loader(target, is_text_model=True)
+def gguf_mmproj_loader(path, arch=None):
+    # Reverse version of Qwen2VLVisionModel.modify_tensors
+    logging.info("Attempting to find mmproj file for text encoder...")
+    target, tenc = find_mmproj(path, MMPROJ_PROJECTORS.get(arch))
+    if target is None:
+        logging.error(f"Error: Can't find mmproj file for '{os.path.basename(path)}' (matching:'{tenc}')! Vision input (e.g. Qwen-Image-Edit) will be broken!")
+        return {}
+
+    logging.info(f"Using mmproj '{os.path.basename(target)}' for text encoder '{os.path.basename(path)}'.")
+    vsd, extra = gguf_sd_loader(target, is_text_model=True)
 
     # concat 4D to 5D
     if "v.patch_embd.weight.1" in vsd:
@@ -306,7 +409,14 @@ def gguf_mmproj_loader(path):
         vsd["v.patch_embd.weight"] = torch.stack([w1, w2], dim=2)
 
     # run main replacement
-    vsd = sd_map_replace(vsd, CLIP_VISION_SD_MAP)
+    key_map = CLIP_VISION_SD_MAP
+    if extra["metadata"].get("clip.projector_type") == "qwen3vl_merger":
+        key_map = QWEN3_VISION_SD_MAP.copy()
+        deepstack_layers = sorted({int(k.split(".")[2]) for k in vsd if k.startswith("v.deepstack.")})
+        for i, layer in enumerate(deepstack_layers):
+            for src, dst in (("fc1", "linear_fc1"), ("fc2", "linear_fc2"), ("norm", "norm")):
+                key_map[f"v.deepstack.{layer}.{src}."] = f"visual.deepstack_merger_list.{i}.{dst}."
+    vsd = sd_map_replace(vsd, key_map)
 
     # handle split Q/K/V
     if "visual.blocks.0.attn_q.weight" in vsd:
@@ -332,6 +442,9 @@ def gguf_mmproj_loader(path):
             ], dim=0)
         del attns
 
+        # drop the now merged split tensors
+        vsd = {k: v for k, v in vsd.items() if not re.search(r"\.attn_[qkv]\.", k)}
+
     return vsd
 
 def gguf_tokenizer_loader(path, temb_shape):
@@ -347,7 +460,7 @@ def gguf_tokenizer_loader(path, temb_shape):
 
     if get_field(reader, "tokenizer.ggml.model", str) == "t5":
         if temb_shape == (256384, 4096): # probably UMT5
-            spm.trainer_spec.model_type == 1 # Unigram (do we have a T5 w/ BPE?)
+            spm.trainer_spec.model_type = 1 # Unigram (do we have a T5 w/ BPE?)
         else:
             raise NotImplementedError("Unknown model, can't set tokenizer!")
     else:
@@ -361,10 +474,6 @@ def gguf_tokenizer_loader(path, temb_shape):
     toktypes = get_list_field(reader, "tokenizer.ggml.token_type", int)
 
     for idx, (token, score, toktype) in enumerate(zip(tokens, scores, toktypes)):
-        # # These aren't present in the original?
-        # if toktype == 5 and idx >= temb_shape[0]%1000):
-        #     continue
-
         piece = spm.SentencePiece()
         piece.piece = token
         piece.score = score
@@ -393,7 +502,7 @@ def gguf_tekken_tokenizer_loader(path, temb_shape):
 
     model_str = get_field(reader, "tokenizer.ggml.model", str)
     if model_str == "gpt2":
-        if temb_shape == (131072, 5120): # probably Mistral
+        if temb_shape[0] == 131072: # Mistral Small 3.x (5120) / Ministral 3 (3072)
             data = {
                 "config": {"num_vocab_tokens": 150000, "default_vocab_size": 131072},
                 "vocab": [],
@@ -425,8 +534,8 @@ def gguf_tekken_tokenizer_loader(path, temb_shape):
     del reader
     return torch.ByteTensor(list(json.dumps(data).encode('utf-8')))
 
-def gguf_gemma3_tokenizer_loader(path):
-    #TODO: merge into gguf_tokenizer_loader
+def gguf_gemma_tokenizer_loader(path):
+    # Gemma 2 / Gemma 3 sentencepiece (BPE, byte fallback, identity normalizer)
     logging.info("Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
     try:
         from sentencepiece import sentencepiece_model_pb2 as model
@@ -446,10 +555,10 @@ def gguf_gemma3_tokenizer_loader(path):
     tokens = get_list_field(reader, "tokenizer.ggml.tokens", str)
     scores = get_list_field(reader, "tokenizer.ggml.scores", float)
     toktype = get_list_field(reader, "tokenizer.ggml.token_type", int)
-    
+
     if not tokens or not scores or not toktype:
         raise ValueError("Missing tokenizer metadata")
-    
+
     for idx in range(len(tokens)):
         piece = spm.SentencePiece()
         piece.piece = tokens[idx]
@@ -460,16 +569,40 @@ def gguf_gemma3_tokenizer_loader(path):
             piece.type = toktype[idx]
             piece.score = scores[idx]
         spm.pieces.append(piece)
-    
+
     spm.trainer_spec.vocab_size = len(spm.pieces)
     logging.info(f"Created tokenizer with vocab size of {len(spm.pieces)}")
-    
+
     del reader
     return torch.ByteTensor(list(spm.SerializeToString()))
+
+gguf_gemma3_tokenizer_loader = gguf_gemma_tokenizer_loader # backwards compat alias
+
+def _head_counts(metadata, arch, default=(32, 8)):
+    n_head = metadata.get(f"{arch}.attention.head_count")
+    n_head_kv = metadata.get(f"{arch}.attention.head_count_kv", n_head)
+    if not n_head:
+        return default
+    return int(n_head), int(n_head_kv)
 
 def gguf_clip_loader(path):
     sd, extra = gguf_sd_loader(path, is_text_model=True)
     arch = extra.get("arch_str", None)
+    metadata = extra.get("metadata", {})
+
+    # Files that already store ComfyUI/HF tensor names (e.g. custom Gemma4 / Qwen3.5
+    # conversions, quantized CLIP/T5 dumps) are passed through untouched.
+    layout = metadata.get("comfy.gguf.tensor_name_layout")
+    if layout == "comfy_state_dict" or not uses_lcpp_names(sd.keys()):
+        logging.info(f"ComfyUI-GGUF: '{os.path.basename(path)}' uses ComfyUI tensor names, skipping llama.cpp remap [arch:{arch}]")
+        # Same policy as below: tied-embedding logits (generate / prompt enhance) read the
+        # whole table through comfy's own cast path, so large vocab tables can't stay quantized.
+        for k in list(sd.keys()):
+            if k.endswith(("embed_tokens.weight", "shared.weight")) and is_quantized(sd[k]) and sd[k].shape[0] >= (64 * 1024):
+                logging.warning(f"Dequantizing {k} to prevent runtime OOM.")
+                sd[k] = dequantize_tensor(sd[k], dtype=torch.float16)
+        return sd
+
     if arch in {"t5", "t5encoder"}:
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape == (256384, 4096):
@@ -479,28 +612,43 @@ def gguf_clip_loader(path):
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         sd = sd_map_replace(sd, T5_SD_MAP)
-    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}:
+    elif arch in LLAMA_LIKE_ARCHS:
         # TODO: pass model_options["vocab_size"] to loader somehow
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape[0] >= (64 * 1024):
-            if arch == "llama" and sd[temb_key].shape == (131072, 5120):
-                # non-standard Comfy-Org tokenizer
+            if arch in PERMUTED_QK_ARCHS and sd[temb_key].shape[0] == 131072:
+                # non-standard Comfy-Org tokenizer (Mistral Small 3.x / Ministral 3)
                 sd["tekken_model"] = gguf_tekken_tokenizer_loader(path, sd[temb_key].shape)
-            elif arch == "gemma3":
-                sd["spiece_model"] = gguf_gemma3_tokenizer_loader(path)
+            elif arch in GEMMA_ARCHS:
+                sd["spiece_model"] = gguf_gemma_tokenizer_loader(path)
             # See note above for T5.
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
+
         if arch == "gemma3":
             sd = sd_map_replace(sd, GEMMA3_SD_MAP)
-            sd = gemma3_norm_corrections(sd)
+            sd = gemma_norm_corrections(sd)
+        elif arch == "gemma2":
+            sd = sd_map_replace(sd, GEMMA2_SD_MAP)
+            sd = gemma_norm_corrections(sd)
         else:
             sd = sd_map_replace(sd, LLAMA_SD_MAP)
-        if arch == "llama":
-            sd = llama_permute(sd, 32, 8) # L3 / Mistral
-        if arch == "qwen2vl":
-            vsd = gguf_mmproj_loader(path)
+
+        if arch in PERMUTED_QK_ARCHS:
+            n_head, n_head_kv = _head_counts(metadata, arch)
+            sd = llama_permute(sd, n_head, n_head_kv) # L3 / Mistral / Ministral
+
+        if arch in {"qwen2vl", "qwen25vl", "qwen3vl"}:
+            vsd = gguf_mmproj_loader(path, arch)
+            if arch == "qwen3vl":
+                if not vsd:
+                    raise ValueError(f"Qwen3-VL requires a matching mmproj GGUF alongside the text encoder: {path}")
+                # ComfyUI expects HF layout (model.visual.*) for the 4B/8B variants and a
+                # flat layout (visual.*) for the truncated 32B MiniMax-H3 encoder.
+                hidden = metadata.get("qwen3vl.embedding_length")
+                if hidden in (2560, 4096):
+                    vsd = {f"model.{k}": v for k, v in vsd.items()}
             sd.update(vsd)
     else:
-        pass
+        logging.warning(f"ComfyUI-GGUF: no llama.cpp key mapping for text architecture {arch!r}, loading tensor names as-is")
     return sd

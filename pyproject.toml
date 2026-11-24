@@ -1,14 +1,16 @@
 [project]
-name = "comfyui-gguf"
-description = "GGUF Quantization support for native ComfyUI models."
-version = "2.0.0" # 2.0.0 = GitHub main, 1.X.X = ComfyUI Registry
+name = "comfyui-gguf-next"
+description = "GGUF quantization support for native ComfyUI models - extended model/quant coverage and faster dequantization (fork of city96/ComfyUI-GGUF)."
+version = "0.1.0"
 license = { file = "LICENSE" }
+requires-python = ">=3.9"
 dependencies = ["gguf>=0.13.0", "sentencepiece", "protobuf"]
 
 [project.urls]
-Repository = "https://github.com/city96/ComfyUI-GGUF"
+Repository = "https://github.com/Zrn59/ComfyUI-GGUF-Next"
+Upstream = "https://github.com/city96/ComfyUI-GGUF"
 
 [tool.comfy]
-PublisherId = "city96"
-DisplayName = "ComfyUI-GGUF"
+PublisherId = "" # TODO: set your ComfyUI Registry publisher id
+DisplayName = "ComfyUI-GGUF-Next"
 Icon = ""

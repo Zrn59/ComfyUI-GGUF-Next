@@ -1,4 +1,6 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+# Modified by ComfyUI-GGUF-Next: compile_dequant option, load-time dequant hook, duplicate install warning
+import os
 import torch
 import logging
 import inspect
@@ -13,9 +15,37 @@ import comfy.model_patcher
 import comfy.model_management
 import folder_paths
 
-from .ops import GGMLOps, move_patch_to_device
+from .ops import GGMLOps, move_patch_to_device, dequant_on_copy
 from .loader import gguf_sd_loader, gguf_clip_loader
-from .dequant import is_quantized, is_torch_compatible
+from .dequant import is_quantized, is_torch_compatible, set_compile_dequant, supported_qtypes
+
+logging.info(f"ComfyUI-GGUF-Next: native dequant for {', '.join(supported_qtypes())}")
+
+def warn_on_duplicate_install():
+    """Both packs register the same node IDs - whichever loads last silently wins."""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    dupes = []
+    try:
+        for name in sorted(os.listdir(root)):
+            path = os.path.join(root, name)
+            if path == here or name.endswith(".disabled") or not os.path.isdir(path):
+                continue
+            node_file = os.path.join(path, "nodes.py")
+            if os.path.isfile(node_file):
+                with open(node_file, "r", encoding="utf-8", errors="ignore") as f:
+                    if "class UnetLoaderGGUF" in f.read():
+                        dupes.append(name)
+    except OSError:
+        return
+    if dupes:
+        logging.warning(
+            "ComfyUI-GGUF-Next: another GGUF node pack is installed (%s). It registers the same nodes, "
+            "so whichever loads last wins. Disable it (rename the folder to '<name>.disabled') to use GGUF-Next.",
+            ", ".join(dupes))
+
+warn_on_duplicate_install()
 
 def update_folder_names_and_paths(key, targets=[]):
     # check for existing key
@@ -31,6 +61,23 @@ def update_folder_names_and_paths(key, targets=[]):
 # Add a custom keys for files ending in .gguf
 update_folder_names_and_paths("unet_gguf", ["diffusion_models", "unet"])
 update_folder_names_and_paths("clip_gguf", ["text_encoders", "clip"])
+
+def release_mmap_policy(model_bytes, available_bytes=None):
+    """Whether to copy the offloaded weights out of the file mmap on first load, as upstream does.
+    For a model bigger than free RAM that copy can only land in swap, so it is skipped and the weights
+    are read from the file through the page cache instead. GGUF_RELEASE_MMAP=1 / 0 forces it either way."""
+    env = os.environ.get("GGUF_RELEASE_MMAP", "auto").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    if available_bytes is None:
+        try:
+            import psutil
+            available_bytes = psutil.virtual_memory().available
+        except Exception:
+            return True
+    return model_bytes < available_bytes * 0.8
 
 class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
     patch_on_device = False
@@ -90,6 +137,9 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
     named_modules_to_munmap = {}
 
     def load(self, *args, force_patch_weights=False, **kwargs):
+        if not self.mmap_released and not release_mmap_policy(self.model_size()):
+            logging.info(f"ComfyUI-GGUF: model ({self.model_size() / 2**30:.1f} GiB) is larger than free RAM, keeping it memory-mapped instead of copying it to RAM")
+            self.mmap_released = True # nothing to release, weights stay file-backed
         if not self.mmap_released:
             self.named_modules_to_munmap = dict(self.model.named_modules())
 
@@ -147,8 +197,10 @@ class UnetLoaderGGUF:
     CATEGORY = "bootleg"
     TITLE = "Unet Loader (GGUF)"
 
-    def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None):
+    def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None, compile_dequant=None):
         ops = GGMLOps()
+        if compile_dequant is not None:
+            set_compile_dequant(compile_dequant)
 
         if dequant_dtype in ("default", None):
             ops.Linear.dequant_dtype = None
@@ -173,12 +225,15 @@ class UnetLoaderGGUF:
         if "metadata" in valid_params:
             kwargs["metadata"] = extra.get("metadata", {})
 
-        model = comfy.sd.load_diffusion_model_state_dict(
-            sd, model_options={"custom_operations": ops}, **kwargs,
-        )
+        with dequant_on_copy():
+            model = comfy.sd.load_diffusion_model_state_dict(
+                sd, model_options={"custom_operations": ops}, **kwargs,
+            )
         if model is None:
             logging.error("ERROR UNSUPPORTED UNET {}".format(unet_path))
-            raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
+            raise RuntimeError(
+                "ERROR: Could not detect model type of: {}\n(gguf arch: {}) - this ComfyUI version may not support this model yet, try updating ComfyUI.".format(
+                    unet_path, extra.get("arch_str")))
         model = GGUFModelPatcher.clone(model)
         model.patch_on_device = patch_on_device
         return (model,)
@@ -193,6 +248,12 @@ class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
                 "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
                 "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
                 "patch_on_device": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "compile_dequant": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Fuse the dequantization kernels with torch.compile (needs triton). Global setting, first steps are slower while compiling.",
+                }),
             }
         }
     TITLE = "Unet Loader (GGUF/Advanced)"
@@ -233,15 +294,16 @@ class CLIPLoaderGGUF:
         return clip_data
 
     def load_patcher(self, clip_paths, clip_type, clip_data):
-        clip = comfy.sd.load_text_encoder_state_dicts(
-            clip_type = clip_type,
-            state_dicts = clip_data,
-            model_options = {
-                "custom_operations": GGMLOps,
-                "initial_device": comfy.model_management.text_encoder_offload_device()
-            },
-            embedding_directory = folder_paths.get_folder_paths("embeddings"),
-        )
+        with dequant_on_copy():
+            clip = comfy.sd.load_text_encoder_state_dicts(
+                clip_type = clip_type,
+                state_dicts = clip_data,
+                model_options = {
+                    "custom_operations": GGMLOps,
+                    "initial_device": comfy.model_management.text_encoder_offload_device()
+                },
+                embedding_directory = folder_paths.get_folder_paths("embeddings"),
+            )
         clip.patcher = GGUFModelPatcher.clone(clip.patcher)
         return clip
 

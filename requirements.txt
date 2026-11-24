@@ -1,5 +1,13 @@
-# main
+# ComfyUI-GGUF-Next dependencies.
+#
+# Deliberately minimal and unpinned (lower bounds only), so installing this never
+# upgrades or downgrades anything already present in your ComfyUI environment.
+# torch / numpy / transformers are NOT listed on purpose: ComfyUI provides them.
+
+# required - GGUF file reader (pulls in only numpy/pyyaml/tqdm/requests, lower bounds)
 gguf>=0.13.0
-# optional - tokenizer
+
+# tokenizer rebuild from GGUF metadata (T5/UMT5, Gemma). sentencepiece is already
+# a ComfyUI requirement; protobuf is only imported when a tokenizer is rebuilt.
 sentencepiece
 protobuf

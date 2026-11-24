@@ -1,12 +1,15 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+# Modified by ComfyUI-GGUF-Next: extra layer types, quantized embedding row-gather, dequant-on-copy at load
 import gguf
 import torch
 import logging
+import threading
+import contextlib
 
 import comfy.ops
 import comfy.lora
 import comfy.model_management
-from .dequant import dequantize_tensor, is_quantized
+from .dequant import dequantize_tensor, dequantize, is_quantized
 
 def chained_hasattr(obj, chained_attr):
     probe = obj
@@ -40,6 +43,11 @@ def get_torch_compiler_disable_decorator():
         return torch.compiler.disable
 
 torch_compiler_disable = get_torch_compiler_disable_decorator()
+
+# `comfy.ops.cast_to` is scheduled for removal upstream, prefer model_management
+_cast_to = getattr(comfy.model_management, "cast_to", None) or comfy.ops.cast_to
+
+_TENSOR_COPY = torch.Tensor.copy_
 
 class GGMLTensor(torch.Tensor):
     """
@@ -90,6 +98,43 @@ class GGMLTensor(torch.Tensor):
             self.tensor_shape = self.size()
         return self.tensor_shape
 
+def _dequant_on_copy_torch_function(cls, func, types, args=(), kwargs=None):
+    # A quantized tensor being copied into a regular parameter/buffer
+    # (i.e. a module that isn't one of our GGML layers, like a bare
+    # nn.Parameter `scale_shift_table` or `modulation`). Copying raw
+    # quant blocks would silently corrupt it, so dequantize first.
+    if func is _TENSOR_COPY and len(args) >= 2:
+        dst, src = args[0], args[1]
+        if isinstance(src, GGMLTensor) and not isinstance(dst, GGMLTensor) and is_quantized(src):
+            src = dequantize_tensor(src, dtype=dst.dtype)
+            if isinstance(src, GGMLTensor):
+                src = src.as_subclass(torch.Tensor)
+            with torch._C.DisableTorchFunctionSubclass():
+                return _TENSOR_COPY(dst, src, *args[2:], **(kwargs or {}))
+    return _BASE_TORCH_FUNCTION(cls, func, types, args, kwargs)
+
+_BASE_TORCH_FUNCTION = torch.Tensor.__torch_function__.__func__
+_load_ctx = {"depth": 0, "lock": threading.Lock()}
+
+@contextlib.contextmanager
+def dequant_on_copy():
+    """
+    Active only while a state dict is being loaded into a model. Kept out of
+    inference on purpose: a custom __torch_function__ on GGMLTensor breaks
+    torch.compile (TorchCompileModel) of the whole model.
+    """
+    with _load_ctx["lock"]:
+        if _load_ctx["depth"] == 0:
+            GGMLTensor.__torch_function__ = classmethod(_dequant_on_copy_torch_function)
+        _load_ctx["depth"] += 1
+    try:
+        yield
+    finally:
+        with _load_ctx["lock"]:
+            _load_ctx["depth"] -= 1
+            if _load_ctx["depth"] == 0:
+                del GGMLTensor.__torch_function__
+
 class GGMLLayer(torch.nn.Module):
     """
     This (should) be responsible for de-quantizing on the fly
@@ -102,9 +147,9 @@ class GGMLLayer(torch.nn.Module):
 
     def is_ggml_quantized(self, *, weight=None, bias=None):
         if weight is None:
-            weight = self.weight
+            weight = getattr(self, "weight", None)
         if bias is None:
-            bias = self.bias
+            bias = getattr(self, "bias", None)
         return is_quantized(weight) or is_quantized(bias)
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
@@ -157,12 +202,6 @@ class GGMLLayer(torch.nn.Module):
             temp = torch.empty(*shape, device=torch.device("meta"), dtype=dtype)
             destination[prefix + "temp.weight"] = temp
 
-        return
-        # This would return the dequantized state dict
-        destination[prefix + "weight"] = self.get_weight(self.weight)
-        if bias is not None:
-            destination[prefix + "bias"] = self.get_weight(self.bias)
-
     def get_weight(self, tensor, dtype):
         if tensor is None:
             return
@@ -170,6 +209,7 @@ class GGMLLayer(torch.nn.Module):
         # consolidate and load patches to GPU in async
         patch_list = []
         device = tensor.device
+        key = None
         for patches, key in getattr(tensor, "patches", []):
             patch_list += move_patch_to_device(patches, device)
 
@@ -178,7 +218,7 @@ class GGMLLayer(torch.nn.Module):
 
         # prevent propagating custom tensor class
         if isinstance(weight, GGMLTensor):
-            weight = torch.Tensor(weight)
+            weight = torch.Tensor(weight) # NOTE: as_subclass() breaks torch.compile here
 
         # apply patches
         if len(patch_list) > 0:
@@ -204,10 +244,10 @@ class GGMLLayer(torch.nn.Module):
         non_blocking = comfy.model_management.device_supports_non_blocking(device)
         if s.bias is not None:
             bias = s.get_weight(s.bias.to(device), dtype)
-            bias = comfy.ops.cast_to(bias, bias_dtype, device, non_blocking=non_blocking, copy=False)
+            bias = _cast_to(bias, bias_dtype, device, non_blocking=non_blocking, copy=False)
 
         weight = s.get_weight(s.weight.to(device), dtype)
-        weight = comfy.ops.cast_to(weight, dtype, device, non_blocking=non_blocking, copy=False)
+        weight = _cast_to(weight, dtype, device, non_blocking=non_blocking, copy=False)
         return weight, bias
 
     def forward_comfy_cast_weights(self, input, *args, **kwargs):
@@ -243,20 +283,101 @@ class GGMLOps(comfy.ops.manual_cast):
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.linear(input, weight, bias)
 
+    class Conv1d(GGMLLayer, comfy.ops.manual_cast.Conv1d):
+        def forward_ggml_cast_weights(self, input):
+            weight, bias = self.cast_bias_weight(input)
+            return self._conv_forward(input, weight, bias)
+
     class Conv2d(GGMLLayer, comfy.ops.manual_cast.Conv2d):
         def forward_ggml_cast_weights(self, input):
             weight, bias = self.cast_bias_weight(input)
             return self._conv_forward(input, weight, bias)
 
+    class Conv3d(GGMLLayer, comfy.ops.manual_cast.Conv3d):
+        def forward_ggml_cast_weights(self, input, autopad=None):
+            weight, bias = self.cast_bias_weight(input)
+            if autopad is None:
+                return self._conv_forward(input, weight, bias)
+            return self._conv_forward(input, weight, bias, autopad=autopad)
+
+    class ConvTranspose1d(GGMLLayer, comfy.ops.manual_cast.ConvTranspose1d):
+        def forward_ggml_cast_weights(self, input, output_size=None):
+            output_padding = self._output_padding(
+                input, output_size, self.stride, self.padding, self.kernel_size, 1, self.dilation)
+            weight, bias = self.cast_bias_weight(input)
+            return torch.nn.functional.conv_transpose1d(
+                input, weight, bias, self.stride, self.padding, output_padding, self.groups, self.dilation)
+
+    class ConvTranspose2d(GGMLLayer, comfy.ops.manual_cast.ConvTranspose2d):
+        def forward_ggml_cast_weights(self, input, output_size=None):
+            output_padding = self._output_padding(
+                input, output_size, self.stride, self.padding, self.kernel_size, 2, self.dilation)
+            weight, bias = self.cast_bias_weight(input)
+            return torch.nn.functional.conv_transpose2d(
+                input, weight, bias, self.stride, self.padding, output_padding, self.groups, self.dilation)
+
     class Embedding(GGMLLayer, comfy.ops.manual_cast.Embedding):
+        def _can_gather_rows(self):
+            # row-major quantized table without LoRA patches: dequantize only the rows we need
+            w = self.weight
+            if w is None or not is_quantized(w) or len(getattr(w, "patches", [])) > 0:
+                return False
+            if self.max_norm is not None:
+                return False
+            shape = getattr(w, "tensor_shape", None)
+            return shape is not None and len(shape) == 2 and w.data.ndim == 2 and w.data.shape[0] == shape[0]
+
+        def _gather_rows(self, input, dtype):
+            w = self.weight
+            idx = input.reshape(-1).to(w.device)
+            rows = torch.Tensor(w.data[idx])
+            rows = rows.to(input.device)
+            # same semantics as dequantize_tensor(): None keeps the kernel's native precision
+            deq_dtype = dtype if self.dequant_dtype == "target" else self.dequant_dtype
+            out = dequantize(rows, w.tensor_type, (idx.shape[0], w.tensor_shape[1]), dtype=deq_dtype)
+            return out.to(dtype).reshape(*input.shape, w.tensor_shape[1])
+
         def forward_ggml_cast_weights(self, input, out_dtype=None):
             output_dtype = out_dtype
             if self.weight.dtype == torch.float16 or self.weight.dtype == torch.bfloat16:
                 out_dtype = None
+            if self._can_gather_rows():
+                # same default as upstream: cast_bias_weight(self, ...) falls back to float32
+                return self._gather_rows(input, out_dtype or torch.float32).to(dtype=output_dtype)
             weight, _bias = self.cast_bias_weight(self, device=input.device, dtype=out_dtype)
             return torch.nn.functional.embedding(
                 input, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse
             ).to(dtype=output_dtype)
+
+        def host_rows(self, input, out_dtype=None):
+            if self._can_gather_rows():
+                return self._gather_rows(input, out_dtype or torch.float32)
+            return super().host_rows(input, out_dtype=out_dtype)
+
+        def _host_table(self, input):
+            # a large plain table that stays on the host (e.g. a 262k-row token embedding kept in fp16):
+            # copy only the looked-up rows to the device instead of the whole table on every call
+            w = self.weight
+            if w is None or is_quantized(w) or w.ndim != 2 or w.shape[0] < 64 * 1024:
+                return False
+            if w.device.type != "cpu" or input.device.type == "cpu" or self.max_norm is not None:
+                return False
+            if len(getattr(self, "weight_function", [])) > 0 or getattr(self, "weight_lowvram_function", None) is not None:
+                return False
+            return len(getattr(w, "patches", [])) == 0
+
+        def forward_comfy_cast_weights(self, input, out_dtype=None):
+            if self._host_table(input):
+                # the full-table path casts the weight only when it isn't fp16/bf16, then casts the output;
+                # a cast commutes with row selection, so the result is the same bit for bit
+                w = torch.Tensor(self.weight)
+                if out_dtype is not None and w.dtype not in (torch.float16, torch.bfloat16):
+                    w_dtype = out_dtype
+                else:
+                    w_dtype = w.dtype
+                rows = w[input.reshape(-1).cpu()].to(input.device).to(w_dtype)
+                return rows.view(*input.shape, rows.shape[-1]).to(dtype=out_dtype)
+            return super().forward_comfy_cast_weights(input, out_dtype=out_dtype)
 
     class LayerNorm(GGMLLayer, comfy.ops.manual_cast.LayerNorm):
         def forward_ggml_cast_weights(self, input):
@@ -264,6 +385,14 @@ class GGMLOps(comfy.ops.manual_cast):
                 return super().forward_comfy_cast_weights(input)
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.layer_norm(input, self.normalized_shape, weight, bias, self.eps)
+
+    if hasattr(comfy.ops.manual_cast, "RMSNorm"): # newer ComfyUI only
+        class RMSNorm(GGMLLayer, comfy.ops.manual_cast.RMSNorm):
+            def forward_ggml_cast_weights(self, input):
+                if self.weight is None:
+                    return super().forward_comfy_cast_weights(input)
+                weight, _bias = self.cast_bias_weight(input)
+                return torch.nn.functional.rms_norm(input, self.normalized_shape, weight, self.eps)
 
     class GroupNorm(GGMLLayer, comfy.ops.manual_cast.GroupNorm):
         def forward_ggml_cast_weights(self, input):
