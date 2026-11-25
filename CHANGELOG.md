@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `tests/test_dequant.py` compares the kernels with the gguf-py reference exactly instead of within a 1e-5 tolerance. Passes on CUDA with gguf 0.13.0 and 0.19.0.
+- README and docs say precisely what is checked: 24 types against the gguf-py 0.19 reference, 26 quantized types out of 35 storage types, and bit-identical output in the comparisons that were actually run (Anima, Qwen2.5-VL-7B).
+
 ## Next 0.1.0 (fork of city96/ComfyUI-GGUF @ 6ea2651)
 
 ### Dequantization (`dequant.py`)

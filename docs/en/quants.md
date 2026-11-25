@@ -4,7 +4,7 @@
 
 ## Types
 
-Every kernel is checked bit for bit against the gguf-py reference with fp32 output (`tests/test_dequant.py`).
+Every kernel that gguf-py has a numpy reference for is checked bit for bit against it, with fp32 output, on synthetic data (`tests/test_dequant.py`). With `gguf` 0.19 that is 24 types. Q1_0, Q2_0 and F8_E4M3 have a reference only in master gguf-py. Q8_K has none, so it has its own test, and so does Q1_0.
 
 | Family | Types |
 | --- | --- |

@@ -45,7 +45,8 @@ def check_against_reference(qtype):
     ref = gguf.quants.dequantize(raw, qtype).reshape(-1).astype(np.float32)
     got = run_torch(raw, qtype, block_size)
     assert got.shape == ref.shape, (qtype.name, got.shape, ref.shape)
-    np.testing.assert_allclose(got, ref, rtol=1e-5, atol=1e-6, equal_nan=True, err_msg=qtype.name)
+    # exact: every value must equal the reference (NaN matches NaN)
+    np.testing.assert_array_equal(got, ref, err_msg=qtype.name)
 
 def test_all_reference_types():
     tested, skipped = [], []

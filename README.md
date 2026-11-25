@@ -20,11 +20,11 @@
   Anima Q4_K_M, same workflow and seed. Left: city96/ComfyUI-GGUF. Middle: GGUF-Next. Right: the difference, 0 values differ.
 </p>
 
-GGUF loader nodes for ComfyUI. This is a fork of [city96/ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) with more quant types, more diffusion models and more text encoders. Node IDs, inputs and the category are the same, so existing workflows open unchanged. All 35 ggml storage types are dequantized in torch, on the GPU.
+GGUF loader nodes for ComfyUI. This is a fork of [city96/ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) with more quant types, more diffusion models and more text encoders. Node IDs, inputs and the category are the same, so existing workflows open unchanged. All 35 ggml storage types, 26 of them quantized, are handled in torch, on the GPU.
 
 | | city96/ComfyUI-GGUF | ComfyUI-GGUF-Next |
 | --- | --- | --- |
-| Quant types dequantized in torch | 15 | 35 (all ggml storage types) |
+| Storage types handled in torch | 15, of them 12 quantized | 35 (all ggml storage types), of them 26 quantized |
 | IQ1/IQ2/IQ3, TQ (Unsloth "UD" files) | numpy on the CPU, every layer, every step | torch, bit-exact with gguf-py |
 | Diffusion architectures | whitelist of 12 | whatever your ComfyUI detects |
 | Text encoders | T5, Llama, Qwen2.5-VL, Qwen3, Gemma 3 | + Gemma 2, Qwen2, Mistral 3, Qwen3-VL incl. 32B, ComfyUI-layout GGUFs |
@@ -34,7 +34,7 @@ GGUF loader nodes for ComfyUI. This is a fork of [city96/ComfyUI-GGUF](https://g
 | Model bigger than free RAM | copied into RAM on first load, ends up in swap | stays memory-mapped, read from the file |
 | `convert.py` / `lcpp.patch` architectures | 11 | about 30 |
 
-On models upstream already supports, the output is the same bit for bit, with and without a LoRA. CLIPLoader (GGUF) gives the same image as the stock CLIPLoader.
+In the comparisons with upstream the output is the same bit for bit: the Anima image, with and without a LoRA, and the Qwen2.5-VL-7B text encoding. CLIPLoader (GGUF) gives the same image as the stock CLIPLoader.
 
 ## Checked on real files
 
@@ -140,7 +140,7 @@ More: [docs/en/README.md](docs/en/README.md). Suggestions: [Discussions](https:/
 | Check | Result |
 | --- | --- |
 | pytest: 22 cases for kernels, layers and the loader. CPU and CUDA, with and without `torch.compile`, gguf 0.13.0, 0.17.1, 0.19.0 and master | all pass |
-| All 35 dequant kernels against the gguf-py reference | bit for bit |
+| Every dequant kernel that gguf-py 0.19 has a reference for (24 types), synthetic data, fp32 output, CPU and CUDA. Q1_0 and Q8_K have their own tests | bit for bit |
 | Anima image against city96: Unet Loader (GGUF), the Advanced loader, with a LoRA, `GGUF_RELEASE_MMAP=0` and `1` | bit-identical |
 | Qwen2.5-VL-7B text encoding against city96 and leejet | bit-identical |
 | `compile_dequant` on every quantized tensor of the Anima file | never further from fp32 than the regular path |
